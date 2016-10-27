@@ -92,9 +92,9 @@ Let's say I have the following example:
 
 The output will be:
 
-	Hell - HellWate - HellWater Power
+	Hell - HellWate - HellWate
 
-*Wait,*what?* For "a" Go created a new slice. For "b" go took the first slice and appended "Fire", since the capacity wasn't enough, it made it grew. For "c", Go reused up to "Wate" (since it has the same length than "Fire") and since it points to the same array, it modified the original, replaced the letters and appended the rest.
+*Wait,*what?* For "a" Go created a new slice. For "b" go took the first slice and appended "Fire", since the capacity wasn't enough, it made it grew. For "c", Go reused up to "Wate" (since it has the same length than "Fire") and since it points to the same array, it modified the original, replaced the letters and continue.
 
 Since we print at the end, we don't get to see "b" modified, but creating "c" also modified "b"! And there's no *Hellfire* now 😱
 

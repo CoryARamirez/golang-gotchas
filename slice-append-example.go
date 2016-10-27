@@ -7,7 +7,7 @@ func main() {
 
 	a := []byte("Hell")
 	b := append(a, []byte("Fire")...)
-	c := append(a, []byte("Water Power")...)
+	c := append(a, []byte("Wate")...)
 	fmt.Println(string(a), "-", string(b), "-", string(c))
 
 	// END OMIT
