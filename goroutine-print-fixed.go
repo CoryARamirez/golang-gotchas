@@ -12,9 +12,9 @@ func main() {
 
 	// Option 1: Make a local copy, which looks nasty and adds more complexity.
 	for _, n := range numbers {
-		n := n // Avoid this! // HL
+		nn := n // Avoid this! // HL
 		go func() {
-			fmt.Println("Number:", n)
+			fmt.Println("Number:", nn)
 		}()
 	}
 
