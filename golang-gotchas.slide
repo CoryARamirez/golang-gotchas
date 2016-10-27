@@ -1,0 +1,405 @@
+Go gotchas and common mistakes
+Hewlett-Packard Enterprise
+17 Nov 2016
+
+Patrick D'appollonio
+patrick.dappollonio@hpe.com
+@marlex
+
+* Summary
+
+I'm not going to talk on how to write proper Go code. At this point anybody here knows how. Also that checking for errors is a must and not shadowing them too. We will talk about some of those mistakes that honestly doesn't make any sense, like:
+
+- Slices, arrays and the infamous `append()`.
+- Evil, rogue goroutines.
+- The Go Scheduler.
+- Strings and runes.
+- Network and HTTP request.
+- No to reflection.
+- Interfaces vs Interface Values.
+
+* Slices gotchas
+
+* Slices are structs with pointers
+
+A common problem that everyone doesn't realize is that slices are actual structs with pointers. Also, *slices*are*not*arrays*: Arrays have a fixed size and the size *can*not*be*changed*:
+
+	var data [256]byte
+
+Creates a byte array with up to 256 elements on it.
+
+If you really want to extend it, then what you need to do is copy the contents *to*a*new*slice* with more space on it.
+
+* Slices internals
+
+Under the hood, an slice looks like this:
+
+.code slice-object.go /START OMIT/,/END OMIT/
+
+Note that the slice contains a *length*, a *capacity* and *the*byte*position*for*the*zero-element* (the first one in a slice). Simply talking, a slice is just an array-on-steroids that points to a contiguous set of memory.
+
+* Slices gotchas
+
+When you pass an slice by value (which is the default way in Go, this is, making a copy of the variable in question), *you're*passing*a*copy*of*the*slice*:
+
+.play slice-reference.go /START OMIT/,/END OMIT/
+.caption [[https://play.golang.org/p/BnswFJX8lX]]
+
+`sl` function will receive a copy of the slice. So why did it changed the content of `data`?
+
+	[]string{"d", "e", "f"}
+
+* Slice passed by value
+
+Any slice passed by value will *still* have a pointer to the beginning of the array, so even making multiples copies, it will still point to the original underlying array!
+
+Even though the slice header is passed by value, the header includes a pointer to elements of an array, so both the original slice header and the copy of the header passed to the function describe the same array.
+
+Thing is: *sometimes*this*will*work,*and*sometimes*it*won't*. Why?
+
+Think about a program that changes the underlying array, but also forces the slice structure to change, like changing where it starts or the size or capacity. If a function tries to modify both the underlying array data, but also the length and capacity, then in this case just the copy will contain those changes (even when the array data changed!).
+
+* Example
+
+.play slice-changed.go /START OMIT/,/END OMIT/
+.caption [[https://play.golang.org/p/6TSWocCnaX]]
+
+	len(original) = 10 // first time
+
+	len(original) = 10 // after calling SubtractOneFromLength()
+	len(modified) = 9  // modified do contain the new length
+
+* First rule of gold
+
+- If your algorithm modifies the len or capacity of slice, it's better to create a copy of it; If it only changes the content, then it's okay to pass it by value.
+
+* append() basics
+
+When using `append()` to change slices, by either adding or removing elements from the slice, the whole flow is:
+
+- See how many elements are going to be appended
+- *Get*the*length*of*the*original*slice*, plus the number of elements being added (let's call this `newlen`)
+- Create *a*new*array* for the new slice
+- Copy the data one by one from the old slice array to the new one
+- Add the remaining elements passed to `append()`
+- Set the `slice.ZeroElement` to the beginning of the new slice, `slice.Length` to `newlen` and `slice.Capacity` to `newlen`
+
+* Spot the problem
+
+Let's say I have the following example:
+
+.play slice-append-example.go /START OMIT/,/END OMIT/
+
+The output will be:
+
+	Hell - HellWate - HellWater Power
+
+*Wait,*what?* For "a" Go created a new slice. For "b" go took the first slice and appended "Fire", since the capacity wasn't enough, it made it grew. For "c", Go reused up to "Wate" (since it has the same length than "Fire") and since it points to the same array, it modified the original, replaced the letters and appended the rest.
+
+Since we print at the end, we don't get to see "b" modified, but creating "c" also modified "b"! And there's no *Hellfire* now 😱
+
+* There's a way to avoid this!
+
+So, when dealing with adding data to an already created slice, we just noted there's too much going on under the hood. *How*we*can*avoid*this?* The simplest way is: Preallocating the slice with an already given capacity.
+
+If we know beforehand how many elements it's likely the slice will contain, we can already optimize this in a simple way. Even if the slice will never have that many but less, you're effectively reducing the number of allocations by far on every loop. Consider the next code...
+
+* Allocation example
+
+.play slice-capacity.go /START OMIT/,/END OMIT/
+
+	OUTPUT:
+
+	[]int{2, 4, 6, 8, 10}
+
+Since the slice will be reallocated on ever loop, we essentially created 10 arrays with 10 slices covering it every time.
+
+* Allocation example [fixed!]
+
+.play slice-capacity-fixed.go /START OMIT/,/END OMIT/
+
+	OUTPUT:
+
+	[]int{2, 4, 6, 8, 10}
+	Size: 5
+
+* Wouldn't that be too much?
+
+Consider this flow:
+
+- We create an slice that goes inside a function called `fnA()`
+- `fnA()` changes the underlying array, by changing the second element to, say, _seven_.
+- `fnA()` returns with the array changed with the _seven_ on it.
+- Then **we pass a copy** of the slice to a different function, say `fnB()`
+- Then `fnB()` modifies *length* and *capacity* by preallocating a new slice.
+- `fnA()` runs again against the same slice
+
+* What will happen?
+
+The result will be:
+
+- For `fnA()` scope, the original slice still points to the same array.
+- For part of `fnB()`, there's the _old_ array *and* the _new_ array.
+- When `fnB()` finishes, `fnA()` would run again, modifying *both*the*slice*for*fnA()*and*fnB()* becoming a nasty bug.
+
+This a slice memory leak: both functions even when the slice totally changed for function B, they both still have a pointer somewhere to the original array, which will stay in memory until the program dies.
+
+The only way to avoid this is *by*just*being*careful*.
+
+* A more complete example of "stale" slices
+
+.play golang-stale-slices.go /START OMIT/,/END OMIT/
+
+	OUTPUT:
+	[1 22 23]
+	[22 23]
+
+* nil slices and nil maps have a length of zero
+
+This is also important. Some times I've seen this code:
+
+.play slice-nil.go /START OMIT/,/END OMIT/
+
+There's no need to check for `if`slice`!=`nil` since the length of an nil (non-initialized) slice [[https://play.golang.org/p/a_0hi5nTZB][is also zero]] (as well as the capacity, while checking with `cap()`):
+
+.play slice-nil-demo.go /START OMIT/,/END OMIT/
+
+	OUTPUT: 0
+
+* Goroutines are cheap but evil
+
+* Consider the following code
+
+What will be the output?
+
+.play goroutine-print.go /START OMIT/,/END OMIT/
+.caption [[https://play.golang.org/p/VDNghLh1oE]]
+
+* Output & Explanation
+
+	Number: 8
+	Number: 8
+	Number: 8
+	Number: 8
+	Number: 8
+	Number: 8
+	Number: 8
+	Number: 8
+
+_Wait,_what?_ When running a Goroutine, when Go encounters a `go` statement, all the flow is "deferred" so the flow can continue and there's no wait. In simple words, Go knew this is something that will happen in parallel, so *it*prioritized*the*for*loop*to*finish* instead of actually printing it.
+
+Same it's true if instead of `go`func()` we use `defer`func()`.
+
+* A more worrying explanation
+
+We use `go` (as in goroutine) here, but the same effect is achieved with `defer`.
+
+.play closing-files-closure.go /START OMIT/,/END OMIT/
+.caption [[https://play.golang.org/p/1Y-A0zFcLt][Full Code in the Go Playground]]
+
+	OUTPUT
+	Closing: three.pdf
+	Closing: three.pdf
+	Closing: three.pdf
+
+With `defer` the flow gets even worse, since defer will stack all closes at once, *only*when*the*looping*finished*completely*.
+
+* What will happen if...?
+
+Think about the implications now. Say the slice is a bunch of files waiting to be "deferred" to be closed. Or network connections we're awaiting to close. If the call to defer is inside the for loop and inside a function that will run later (like an anonymous function), then *never*use*defer*or*goroutine*.
+
+An alternative would be create a non-anonymous function, which will behave differently but _as-we-expect_.
+
+.link https://play.golang.org/p/RnU6v1pTmS Here's an example.
+
+* Solution?
+
+Fortunately, the solution is very simple and you have two options: a) you can *make*a*local*copy* of the variable inside the loop (but it looks nasty); or b) "pass" the value by-value to the closure.
+
+.play goroutine-print-fixed.go /START OMIT/,/END OMIT/
+
+* "Rogue" goroutines and Go Scheduler
+
+Often I suggest that if you have an infinite for loop, the loop: a) must have a way to exit; and b) should contain a select statement. This happens because sometimes part of our code make rogue goroutines preventing it from running:
+
+.play rogue-goroutine.go /START OMIT/,/END OMIT/
+
+Above code will never exit. Even when "allegedly" the goroutine should've been fired right away after declaring `done` to `false`. Go consider an infinite for loop I/O blocking so the scheduler will never allocate a "moment" to run the goroutine. *A*nasty*solution* would be calling `runtime.Gosched()` [[https://play.golang.org/p/x6qO4lGGbf][to force it to run]].
+
+* Strings and runes
+
+* len() of a String?
+
+While working with strings, you're working with the byte array representation that they have. So the following rules apply:
+
+1. Strings are immutable. If you have a string `"helo"` and you want to change the second character, you can't say:
+
+	name := "helo"
+	name[3] = 'p'
+
+This will output:
+
+	main.go:9: cannot assign to name[3]
+
+Note that also the `'p'` letter is surrounded by single quotes, which means it's a byte. This leaves us at...
+
+* You should NEVER use len() to get the length of a string
+
+When doing `len(str)` you're essentially getting the number of bytes a string have, instead of actually getting the number of letters.
+
+This is not annoying, this is actually a *very*real*statement*. We now have the nice "emojis" which are a 3-byte or 4-byte representation of a character. They use 2, 3 or 4 bytes in memory so it makes totally sense for a low-level language like Go to count bytes, if not, if you want to save a file and get the length, you'll get the string length and not the filesize!
+
+.play hearth-str-len.go /START OMIT/,/END OMIT/
+
+	OUTPUT: 3
+
+Now imagine that validation in a database, or in a secure-area of Hellfire. This will make it possible to a simple hearth will be able to crash the validation. Or this one too: 😼
+
+* Okay... What about a solution?
+
+The `unicode/utf8` package. This package has been built *with*localization*and*"future-proofness"* in mind. It works by converting bytes to representable "runes" which hold human-representation of characters, not just bytes:
+
+.play hearth-str-len-revisited.go
+
+	OUTPUT: 1
+
+* Edge cases
+
+There are still some edge cases where certain agreements were done, like the Russian language, where certain letters are indeed multiple letters in one, which is globally acceptable:
+
+.play str-len-special-cases.go
+
+	OUTPUT:
+	Russian E: 2
+	Spanish E: 1
+
+* Edge cases: for loops
+
+There's also an additional case: while iterating over strings, *we*also*iterate*over*bytes*and*not*actual*characters*, which can make the process very complicated. The `for`range` clause will _try_ to match the string byte to an unicode character. If it doesn't work, then it will return `0xfffd` at that place, which is the replacement rune, or the common square you see when there's no font enabled in your browser (□).
+
+The best way to achieve this is using the [[https://godoc.org/golang.org/x/text/unicode/norm#Iter.InitString][func (*Iter) InitString]] which creates an iterator.
+
+Still, chances are no one will ever need to iterate over a string.
+
+* bytes to string and back and forth?
+
+Another thing worth mention is casting byte arrays to strings just to process them. Go has the very common `strings` package which contains functions like `HasPrefix()`, `HasSuffix()`, `Contains()` which are pretty useful in string environments, but often, say, in an HTTP request *you*receive*a*byte*slice*instead*of*an*actual*string*. In those scenarios, there's also a `bytes` package which contains `HasPrefix()`, `HasSuffix()`, `Contains()` and almost all the functions from the `string` package but to use with `bytes`. No conversion needed.
+
+Also, converting bytes to string is usually a bad idea. When type conversion happens, *you*lose*simple*things*like*byte*padding*or*special*characters* affected by the "loop a string" problem (□).
+
+* bytes to string example
+
+Let's assume `data` is an HTTP response body with the text `"this`is`a`JSON`body`from`HTTP`req!"`.
+
+.play byte-array-string.go  /START OMIT/,/END OMIT/
+
+	OUTPUT:
+	[str] The http body does contain the word 'body'!
+	[byte] The http body does contain the word 'body'!
+
+* Network is complicated
+
+* HTTP requests
+
+Some rules about HTTP request and responses:
+
+If the *request* was completed, then there will be _*always*_ an `http.ResponseWriter` back. If the request had no body, *you*still*need*to*close*it* since Go will allocate a zero-sized body (which BTW is an `io.NopCloser`, this means you can only read that body in any way *once* and then it's gone for good!)
+
+	// If the code does indeed make err == nil, then "response"
+	// will be always needed to be closed
+
+	response, err := http.Get("http://example.com/")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer response.Body.Close()
+
+* HTTP requests timeout
+
+*The*default*client*for*HTTP*requests*doesn't*have*a*timeout*. This means if an intermediate proxy, your internet provider, or anything else keeps the connection open forever, then that function will never return, generating a memory leak and keeping all associated resources hung forever! This is usually the source of memory leaks and not-enough file descriptors in Go.
+
+*This*is*both*true*for*HTTP*requests*and*servers!*
+
+It's usually mandatory to set a timeout either [[https://golang.org/src/net/http/client.go#L63][on the client]] (so all subsequent uses of the same client are using this rule) or the request itself.
+
+By not having a timeout, you're wasting a goroutine, making the Go SSA optimizations difficult and having the Go scheduler doing extra work to keep that goroutine somewhere where it doesn't disturb operations. If the process is considered too as "I/O WAIT" this means this goroutine will *hang* all other goroutines in the same thread.
+
+
+* HTTP requests kept forever
+
+You can make a request to a certain API, and depending on the HTTP server or the request made, the connection used to connect to it may be kept in the Background *forever*, even if you finished using it. This is commonly used for long-polling.
+
+	response, err := http.Get("http://long-polling-website.com/")
+	if err != nil { log.Fatal(err) }
+
+	// Even when I close the body, the http connection on http.Get() is still taken,
+	// which takes one file descriptor (or socket) from your computer / server.
+	defer response.Body.Close()
+
+*There*are*three*solutions:*
+
+- Create an [[https://godoc.org/net/http#NewRequest][HTTP request]] yourself, set the `Close` value [[https://godoc.org/net/http#Request][of the structure]] to `true`; or
+- While making the request, add the header: `req.Header.Add("Connection",`"close")`
+- Disabling [[https://golang.org/src/net/http/transport.go#L121][KeepAlive connections in the HTTP transport]] itself.
+- Read a [[https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/][Complete guide on Go Timeouts]] here.
+
+* Say no to ioutil.ReadAll() on HTTP requests
+
+`ioutil.ReadAll()` adds a considerable amount of pressure in a Go program, even with a limited reader (which BTW it doesn't mean it limits how much it reads "per second", but instead how much it will read and then stop!). The goroutine will be considered "I/O Wait" since it's reading from the network and it won't be unlocked until it finishes (if it actually finishes, remember the "kept-forever" part?)
+
+It's better to use `io.Copy()`, move it to a `bytes.Buffer`:
+
+.play network-io-copy.go  /START OMIT/,/END OMIT/
+
+* Reflection is bad, really bad
+
+* Do not use reflection unless you really need to
+
+Reflection is a funny thing. Internally, it uses the `unsafe` package (which is called "unsafe" for a reason). I know that Go doesn't have *generics* but that's also not the excuse to use reflection.
+
+In Go words: _Reflection_in_computing_is_the_ability_of_a_program_to_examine_its_own_structure,_particularly_through_types;_it's_a_form_of_metaprogramming._It's_also_a_great_source_of_confusion_.
+
+Literally speaking, *Reflection*allows*a*program*to*inspect*itself*to*change*its*behavior*. It's pretty much a way to allow you to declare `true` as `false` and agree with it. It makes it difficult to debug and hard to maintain.
+
+*Alternatives:*
+
+- Use *type*casting* for when you need to convert from one type to another (there's another slide for interface type casting).
+- Use *type*switches* which are functionally / concurrently and type safe.
+
+* Interfaces vs interface values and pointers
+
+* Interfaces are tricky
+
+When working with interfaces, one thing to remember is that interfaces is a pretty abstract concept. In one side we have the concept of "interface allows anything to be passed", but there's also an "interface value". This is difficult to explain with words, so let's better jump to the code [[https://play.golang.org/p/Lrygf14nHd][(Runnable link)]]:
+
+.play interface-values.go  /START OMIT/,/END OMIT/
+
+* Rules when working with interfaces
+
+- Ask yourself twice before saying `map[string]interface{}`. Maybe you don't need the interface there. It may be the source of tricky bugs like the previous one.
+- Avoid reflection to know the underlying type. Plus, reflection may NOT find the actual type if the interface went through too many "pass-by-value" functions.
+- Use type switches. At least the flow will be: is it possible to make this interface this concrete type? You'll also know if it's not possible without panicking.
+
+* Last one: pointers
+
+Pointers are a nice thing: they allow you to modify the original structure without disrupting the flow. For those used to Java it also makes them feel at home. The problem with pointers is that you now need to validate them against nil. The compiler won't complain but your app will crash.
+
+.play nil-pointer-in-structure.go  /START OMIT/,/END OMIT/
+
+* Output?
+
+	[👍] Lisa bank is: BoA
+
+	panic: runtime error: invalid memory address or nil pointer dereference
+	[signal SIGSEGV: segmentation violation code=0xffffffff addr=0x0 pc=0x20492]
+
+	goroutine 1 [running]:
+	panic(0x102440, 0x1040a038)
+		/usr/local/go/src/runtime/panic.go:500 +0x720
+	main.main()
+		/tmp/sandbox816552193/main.go:19 +0x492
+
+Happy path works, since we do have something in there, but that doesn't prevent your code by accepting zero-values of pointers (which are "nil"). You'll end up always checking against nil.
+
+* Thank you for watching!
