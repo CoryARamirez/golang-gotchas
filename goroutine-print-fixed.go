@@ -12,16 +12,16 @@ func main() {
 
 	// Option 1: Make a local copy, which looks nasty and adds more complexity.
 	for _, n := range numbers {
-		nn := n // Avoid this! // HL
+		n := n // Avoid this! // HL
 		go func() {
-			fmt.Println("Number:", nn)
+			fmt.Println("Number:", n)
 		}()
 	}
 
 	// Option 2: Pass the value, since Go passes by-value by default.
 	for _, n := range numbers {
 		go func(localnumber int) { // HL
-			fmt.Println("Number:", n)
+			fmt.Println("Number:", localnumber)
 		}(n) // HL
 	}
 
