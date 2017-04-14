@@ -15,3 +15,8 @@ go get -u golang.org/x/tools/cmd/present
 
 Then access the directory where this code was cloned and run the present tool. If you also
 want to have access to the runnable examples, just run with `-play=true` parameter set.
+
+### Online viewer
+
+There's also an online viewer that you can use to go through the presentation by just
+[clicking here](https://go-talks.appspot.com/github.com/patrickdappollonio/golang-gotchas/golang-gotchas.slide#1).
